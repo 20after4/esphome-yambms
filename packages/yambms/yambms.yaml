@@ -404,12 +404,39 @@ sensor:
     lambda: |-
       if (id(${yambms_id}_bms_combined).state == 0) // no BMS combined
         return 0;
+      static float boost = 0.0;
+      float bulk_v = (id(${yambms_id}_bulk_voltage).state + id(${yambms_id}_inverter_offset_v).state + id(${yambms_id}_auto_cvl));
+      auto mode = id(${yambms_id}_charging_instruction).state;
+
       // Bulk
-      else if (id(${yambms_id}_charging_instruction).state == "Bulk")
-        return (id(${yambms_id}_bulk_voltage).state + id(${yambms_id}_inverter_offset_v).state + id(${yambms_id}_auto_cvl));
-      // Float
-      else if (id(${yambms_id}_charging_instruction).state == "Float")
-        return (id(${yambms_id}_float_voltage).state + id(${yambms_id}_inverter_offset_v).state);
+      if (mode == "Bulk") {
+        return bulk_v;
+      } else if (mode == "Float") {
+        std::string solar_mode = id(solar_charge_mode_txt).state;
+        float solar_yield = id(solar_yield_power).state;
+        float current = id(${yambms_id}_current).state;
+        if (solar_mode == "OFF" || solar_mode == "UNAVAILABLE") {
+          boost = 0.0;
+        } else if (current <= 0 && solar_mode == "LIMITED") {
+          // give the solar charger some headroom when it is voltage limited
+          boost = 0.5;
+        } else if (solar_mode == "LIMITED") {
+          boost = 0.35;
+        } else if (solar_mode == "ACTIVE") {
+          // solar charger is active, allow a little headroom
+          boost = 0.15;
+        }
+        float float_voltage = id(${yambms_id}_float_voltage).state;
+        float total_voltage = id(${yambms_id}_total_voltage).state;
+        float requested_v = min(bulk_v, total_voltage + boost + id(${yambms_id}_inverter_offset_v).state);
+
+        return max(
+            requested_v,
+            float_voltage +
+            id(${yambms_id}_inverter_offset_v).state +
+            boost
+        );
+      }
       // Stop Charging
       else return (id(${yambms_id}_rebulk_voltage).state + id(${yambms_id}_inverter_offset_v).state);
 
@@ -448,11 +475,18 @@ sensor:
         - throttle: 10s
         - delta: 0.1
     lambda: |-
+      float ccl=0;
+      float current = id(${yambms_id}_current).state;
+      float ccl_boost = 1;
+      if (current < 0) {
+        ccl_boost +=(-current);
+      }
       // Charging Allowed
-      if ((id(${yambms_id}_charging_instruction).state == "Bulk") | (id(${yambms_id}_charging_instruction).state == "Float"))
-        return (id(${yambms_id}_max_charge_current).state + id(${yambms_id}_auto_ccl));
+      if ((id(${yambms_id}_charging_instruction).state == "Bulk") || (id(${yambms_id}_charging_instruction).state == "Float")) {
+        ccl = (id(${yambms_id}_max_charge_current).state + id(${yambms_id}_auto_ccl));
+      }
       // Charging Not Allowed
-      else return 0;
+      return ccl + ccl_boost;
 
   # +--------------------------------------+
   # |  Requested Discharge Current  (DCL)  |
@@ -469,9 +503,16 @@ sensor:
         - throttle: 10s
         - delta: 0.1
     lambda: |-
+      float soc = id(${yambms_id}_state_of_charge).state;
+      float min_dcl = 0.2;
+      if (id(${yambms_id}_charge_status) == "Float" || (id(${yambms_id}_charging_instruction).state == "Bulk")) {
+        min_dcl = 1;
+      }
+
       // Discharging Allowed
-      if (id(${yambms_id}_discharging_instruction).state == true)
-        return (id(${yambms_id}_max_discharge_current).state + id(${yambms_id}_auto_dcl));
+      if (id(${yambms_id}_discharging_instruction).state == true) {
+        return max(min_dcl, id(${yambms_id}_max_discharge_current).state + id(${yambms_id}_auto_dcl));
+      }
       // Discharging Not Allowed
       else return 0;
 
@@ -552,9 +593,9 @@ text_sensor:
       // +-----------------------------------------------+
       // | Charging Logic                                |
       // +-----------------------------------------------+
-      
+
       // Warning : information from JK BMS is not available immediately after boot
-      
+
       // EOC => Float
       if ((id(${yambms_id}_charge_status) == "EOC") & (id(${yambms_id}_switch_float).state)) id(${yambms_id}_charge_status) = "Float";
       // No Float => EOC
@@ -566,12 +607,12 @@ text_sensor:
       // | Charging allowed (BMS and YamBMS)             |
       // +-----------------------------------------------+
       else if ((id(${yambms_id}_charging_allowed).state) & (id(${yambms_id}_switch_charging).state)) {
-      
+
         // Variables
         float cell_bulk_v = (id(${yambms_id}_bulk_voltage).state / id(${yambms_id}_cell_count).state);
         float cell_rebulk_v = (id(${yambms_id}_rebulk_voltage).state / id(${yambms_id}_cell_count).state);
         float cutoff_offset_v = 0.005;
-        
+        float current = id(${yambms_id}_current).state;
         // +-----------------------------------------------+
         // | Force Bulk Logic                              |
         // +-----------------------------------------------+
@@ -586,7 +627,7 @@ text_sensor:
           // Force Bulk
           else id(${yambms_id}_charge_status) = "Force Bulk";
         }
-        
+
         // +-----------------------------------------------+
         // | Rebulk Logic                                  |
         // +-----------------------------------------------+
@@ -594,7 +635,7 @@ text_sensor:
         else if (id(${yambms_id}_max_cell_voltage).state <= cell_rebulk_v) id(${yambms_id}_charge_status) = "Bulk";
         // SoC <= 85% (default value)
         else if (id(${yambms_id}_battery_soc).state <= id(${yambms_id}_rebulk_soc).state) id(${yambms_id}_charge_status) = "Bulk";
-        
+
         // +-----------------------------------------------+
         // | Charging Logic (Bulk)                         |
         // +-----------------------------------------------+
@@ -603,15 +644,15 @@ text_sensor:
           // +-----------------------------------------------+
           // | Cut-Off Charging Logic                        |
           // +-----------------------------------------------+
-          if (id(${yambms_id}_current).state >= 0)
+          if (current >= 0)
           {
             float cv_min = id(${yambms_id}_cell_min_charge_v);
             float cv_max = id(${yambms_id}_cell_max_charge_v);
             float cutoff_current = (id(${yambms_id}_battery_capacity).state * 0.05 * (cell_bulk_v - cv_min) / (cv_max - cv_min));
-            float cutoff_voltage = (cv_min + (cv_max - cv_min)/(0.05 + cutoff_offset_v) * (id(${yambms_id}_current).state / id(${yambms_id}_battery_capacity).state));
-            
+            float cutoff_voltage = (cv_min + (cv_max - cv_min)/(0.05 + cutoff_offset_v) * (current / id(${yambms_id}_battery_capacity).state));
+
             // Stop Charging
-            if ((id(${yambms_id}_current).state <= cutoff_current) & (id(${yambms_id}_max_cell_voltage).state >= cutoff_voltage))
+            if ((0 < current <= cutoff_current) && (id(${yambms_id}_max_cell_voltage).state >= cutoff_voltage))
             {
               ESP_LOGI("yambms", "Cut-Off Current : %f", cutoff_current);
               ESP_LOGI("yambms", "Cut-Off Voltage : %f", cutoff_voltage);
@@ -624,7 +665,7 @@ text_sensor:
               {
                 // Start EOC timer : the charging process ends at the latest at the end of this timer (30min by default)
                 if (!id(${yambms_id}_script_eoc_timer).is_running()) id(${yambms_id}_script_eoc_timer).execute();
-              }        
+              }
               // End Of Charge
               // Equalizing
               if (id(${yambms_id}_equalizing).state)
@@ -661,7 +702,7 @@ text_sensor:
       }
       // Charging allowed (BMS or YamBMS)
       else id(${yambms_id}_charge_status) = "Wait";
-      
+
       ESP_LOGI("yambms", "Charge Status : %s", id(${yambms_id}_charge_status).c_str());
       return id(${yambms_id}_charge_status);
 
@@ -698,7 +739,7 @@ text_sensor:
   # | YamBMS Errors Bitmask (16bit)        |
   # +--------------------------------------+
 
-  # Bit 0     General alarm                                0000 0000 0000 0001         0x0001 
+  # Bit 0     General alarm                                0000 0000 0000 0001         0x0001
   # Bit 1     Battery high voltage alarm                   0000 0000 0000 0010         0x0002
   # Bit 2     Battery low voltage alarm                    0000 0000 0000 0100         0x0004
   # Bit 3     Battery high temperature alarm               0000 0000 0000 1000         0x0008
@@ -755,10 +796,10 @@ text_sensor:
     update_interval: ${yambms_update_interval}
     entity_category: diagnostic
     icon: mdi:battery-alert
-    lambda: |-      
+    lambda: |-
       // Error Bitmask ?
       uint16_t errors_bitmask = id(${yambms_id}_errors_bitmask_warning).state;
-      
+
       if (errors_bitmask > 0)
       {
         if ((errors_bitmask & 0x0002)) return {"OVP"};         // Over Voltage Protection
@@ -792,7 +833,7 @@ binary_sensor:
       else if (id(${yambms_id}_total_voltage).state <= id(${yambms_id}_requested_discharge_voltage).state) return false;
       // Discharging allowed
       else return true;
-      
+
   # +--------------------------------------+
   # | Requested Force Charge               |
   # +--------------------------------------+
@@ -801,11 +842,18 @@ binary_sensor:
     id: ${yambms_id}_requested_force_charge
     icon: mdi:battery-charging-low
     lambda: |-
+      bool force_charge = false;
+      static bool was_forced = false;
       if (id(${yambms_id}_switch_request_force_charge).state) {
         int soc = id(${yambms_id}_battery_soc).state;
-        if (soc <= id(${yambms_id}_request_force_charge_start_soc).state) return true;
-        else if (soc >= id(${yambms_id}_request_force_charge_stop_soc).state) return false;
-        else if (id(${yambms_id}_requested_force_charge).state) return true;
-        else return false;
+        if (soc <= id(${yambms_id}_request_force_charge_start_soc).state) force_charge = true;
+        else if (soc >= id(${yambms_id}_request_force_charge_stop_soc).state) force_charge = false;
+        else if (id(${yambms_id}_requested_force_charge).state) force_charge = true;
+
+        if (force_charge == true && was_forced == false) {
+          was_forced = true;
+          id(connect_ac_grid).execute();
+        }
       }
-      else return false;
+      was_forced = force_charge;
+      return force_charge;
