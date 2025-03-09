@@ -36,10 +36,11 @@ substitutions:
 
 ethernet:
   manual_ip:
-    static_ip: 10.1.1.162
-    gateway: 10.1.1.1
-    subnet: 255.255.255.0
-    dns1: 10.1.1.1
+    static_ip: !secret static_ip
+    gateway: !secret gateway
+    subnet: !secret subnet
+    dns1: !secret gateway
+    domain: !secret domain
 
 logger:
   level: WARN # DEBUG / INFO / WARN
@@ -71,7 +72,7 @@ packages:
     vars:
       bms_id: '1' # must be a number
       bms_name: 'BMS 1'
-      bms_ble_mac_address: 'A4:C1:38:E1:D0:0C' # Your MAC address
+      bms_ble_mac_address: !secret bms1_mac
       # Required settings cannot be retrieved from BMS
       # These values ​​must match your BMS settings
       # LFP values example
@@ -86,7 +87,7 @@ packages:
     vars:
       bms_id: '2' # must be a number
       bms_name: 'BMS 2'
-      bms_ble_mac_address: 'A5:C2:37:04:C4:AC' # Your MAC address
+      bms_ble_mac_address: !secret bms2_mac
       # Required settings cannot be retrieved from BMS
       # These values ​​must match your BMS settings
       # LFP values example
